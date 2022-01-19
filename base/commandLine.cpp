@@ -4,10 +4,10 @@
  * are too numerous to list here. Please refer to the COPYRIGHT
  * file distributed with this source distribution.
  *
- * This program is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * This program is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU General Public License
+ * as published by the Free Software Foundation; either version 2
+ * of the License, or (at your option) any later version.
  *
  * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
@@ -15,7 +15,8 @@
  * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this program; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301, USA.
  *
  */
 
@@ -34,7 +35,6 @@
 #include "common/config-manager.h"
 #include "common/fs.h"
 #include "common/rendermode.h"
-#include "common/savefile.h"
 #include "common/system.h"
 #include "common/textconsole.h"
 #include "common/tokenizer.h"
@@ -144,6 +144,7 @@ static const char HELP_STRING[] =
 	"                           pce, segacd, wii, windows)\n"
 	"  --savepath=PATH          Path to where saved games are stored\n"
 	"  --extrapath=PATH         Extra path to additional game data\n"
+	"  --screenshots=PATH       Path to where screenshots are saved\n"
 	"  --soundfont=FILE         Select the SoundFont for MIDI playback (only\n"
 	"                           supported by some MIDI drivers)\n"
 	"  --multi-midi             Enable combination AdLib and native MIDI\n"
@@ -171,13 +172,10 @@ static const char HELP_STRING[] =
 	"                           atari, macintosh, macintoshbw)\n"
 #ifdef ENABLE_EVENTRECORDER
 	"  --record-mode=MODE       Specify record mode for event recorder (record, playback,\n"
-	"                           info, update, passthrough [default])\n"
+	"                           passthrough [default])\n"
 	"  --record-file-name=FILE  Specify record file name\n"
 	"  --disable-display        Disable any gfx output. Used for headless events\n"
 	"                           playback by Event Recorder\n"
-	"  --screenshot-period=NUM  When recording, trigger a screenshot every NUM milliseconds\n"
-	"                           (default: 60000)\n"
-	"  --list-records           Display a list of recordings for the target specified\n"
 #endif
 	"\n"
 #if defined(ENABLE_SKY) || defined(ENABLE_QUEEN)
@@ -198,6 +196,10 @@ static const char HELP_STRING[] =
 #ifdef ENABLE_SCUMM
 	"  --tempo=NUM              Set music tempo (in percent, 50-200) for SCUMM games\n"
 	"                           (default: 100)\n"
+#endif
+#if (defined(ENABLE_SCUMM) && defined(ENABLE_SCUMM_7_8)) || defined(ENABLE_GRIM)
+	"  --dimuse-tempo=NUM       Set internal Digital iMuse tempo (10 - 100) per second\n"
+	"                           (default: 10)\n"
 #endif
 	"  --engine-speed=NUM       Set frame per second limit (0 - 100), 0 = no limit\n"
 	"                           (default: 60)\n"
@@ -280,6 +282,8 @@ void registerDefaults() {
 
 	ConfMan.registerDefault("enable_unsupported_game_warning", true);
 
+	ConfMan.registerDefault("screenshotspath", ".");
+
 	// Game specific
 	ConfMan.registerDefault("path", "");
 	ConfMan.registerDefault("platform", Common::kPlatformDOS);
@@ -303,6 +307,10 @@ void registerDefaults() {
 #ifdef ENABLE_SCUMM
 	ConfMan.registerDefault("tempo", 0);
 #endif
+#if (defined(ENABLE_SCUMM) && defined(ENABLE_SCUMM_7_8)) || defined(ENABLE_GRIM)
+	ConfMan.registerDefault("dimuse_tempo", 10);
+#endif
+
 #if defined(ENABLE_SKY) || defined(ENABLE_QUEEN)
 	ConfMan.registerDefault("alt_intro", false);
 #endif
@@ -322,7 +330,6 @@ void registerDefaults() {
 	ConfMan.registerDefault("gui_browser_show_hidden", false);
 	ConfMan.registerDefault("gui_browser_native", true);
 	ConfMan.registerDefault("gui_return_to_launcher_at_exit", false);
-	ConfMan.registerDefault("gui_launcher_chooser", "list");
 	// Specify threshold for scanning directories in the launcher
 	// If number of game entries in scummvm.ini exceeds the specified
 	// number, then skip scanning. -1 = scan always
@@ -511,7 +518,7 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 	// Iterate over all command line arguments and parse them into our string map.
 	for (int i = 1; i < argc; ++i) {
 		s = argv[i];
-		s2 = (i < argc-1) ? argv[i+1] : nullptr;
+		s2 = (i < argc-1) ? argv[i+1] : 0;
 
 		if (s[0] != '-') {
 			// The argument doesn't start with a dash, so it's not an option.
@@ -654,12 +661,6 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 
 			DO_LONG_OPTION("record-file-name")
 			END_OPTION
-
-			DO_LONG_COMMAND("list-records")
-			END_COMMAND
-
-			DO_LONG_OPTION_INT("screenshot-period")
-			END_OPTION
 #endif
 
 			DO_LONG_OPTION("opl-driver")
@@ -795,6 +796,15 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 				}
 			END_OPTION
 
+			DO_LONG_OPTION("screenshotspath")
+				Common::FSNode path(option);
+				if (!path.exists()) {
+					usage("Non-existent screenshots path '%s'", option);
+				} else if (!path.isWritable()) {
+					usage("Non-writable screenshots path '%s'", option);
+				}
+			END_OPTION
+
 			DO_LONG_OPTION_INT("talkspeed")
 			END_OPTION
 
@@ -832,7 +842,10 @@ Common::String parseCommandLine(Common::StringMap &settings, int argc, const cha
 			DO_LONG_OPTION_INT("tempo")
 			END_OPTION
 #endif
-
+#if (defined(ENABLE_SCUMM) && defined(ENABLE_SCUMM_7_8)) || defined(ENABLE_GRIM)
+			DO_LONG_OPTION_INT("dimuse-tempo")
+			END_OPTION
+#endif
 #if defined(ENABLE_SCUMM) || defined(ENABLE_GROOVIE)
 			DO_LONG_OPTION_BOOL("demo-mode")
 			END_OPTION
@@ -1018,78 +1031,25 @@ static void listAllEngineDebugFlags() {
 		printf("ID=%-12s Name=%s\n", metaEngine.getEngineId(), metaEngine.getName());
 		printDebugFlags(metaEngine.getDebugChannels());
 	}
+
 }
-
-static void assembleTargets(const Common::String &singleTarget, Common::Array<Common::String> &targets) {
-	if (!singleTarget.empty()) {
-		targets.push_back(singleTarget);
-		return;
-	}
-
-	// If no target is specified, list save games for all known targets
-	const Common::ConfigManager::DomainMap &domains = ConfMan.getGameDomains();
-	Common::ConfigManager::DomainMap::const_iterator iter;
-
-	targets.reserve(domains.size());
-	for (iter = domains.begin(); iter != domains.end(); ++iter) {
-		targets.push_back(iter->_key);
-	}
-}
-
-#ifdef ENABLE_EVENTRECORDER
-static Common::Error listRecords(const Common::String &singleTarget) {
-	Common::Error result = Common::kNoError;
-
-	Common::Array<Common::String> targets;
-	assembleTargets(singleTarget, targets);
-
-	// FIXME HACK
-	g_system->initBackend();
-
-	Common::String oldDomain = ConfMan.getActiveDomainName();
-
-	for (Common::Array<Common::String>::const_iterator i = targets.begin(), end = targets.end(); i != end; ++i) {
-		Common::String currentTarget;
-		QualifiedGameDescriptor game;
-
-		if (ConfMan.hasGameDomain(*i)) {
-			// The name is a known target
-			currentTarget = *i;
-			EngineMan.upgradeTargetIfNecessary(*i);
-			const Plugin *metaEnginePlugin = nullptr;
-			game = EngineMan.findTarget(*i, &metaEnginePlugin);
-		} else if (game = findGameMatchingName(*i), !game.gameId.empty()) {
-			currentTarget = createTemporaryTarget(game.engineId, game.gameId);
-		} else {
-			return Common::Error(Common::kEnginePluginNotFound, Common::String::format("target '%s'", singleTarget.c_str()));
-		}
-
-		const Common::String &qualifiedGameId = buildQualifiedGameName(game.engineId, game.gameId);
-		ConfMan.setActiveDomain(currentTarget);
-		Common::String pattern(currentTarget + ".r??");
-		const Common::StringArray &files = g_system->getSavefileManager()->listSavefiles(pattern);
-		if (files.empty()) {
-			continue;
-		}
-		printf("Recordings for target '%s' (gameid '%s'):\n", i->c_str(), qualifiedGameId.c_str());
-		for (Common::StringArray::const_iterator x = files.begin(); x != files.end(); ++x) {
-			printf("  %s\n", x->c_str());
-		}
-	}
-
-	// Revert to the old active domain
-	ConfMan.setActiveDomain(oldDomain);
-
-	return result;
-}
-#endif
 
 /** List all saves states for the given target. */
 static Common::Error listSaves(const Common::String &singleTarget) {
 	Common::Error result = Common::kNoError;
 
+	// If no target is specified, list save games for all known targets
 	Common::Array<Common::String> targets;
-	assembleTargets(singleTarget, targets);
+	if (!singleTarget.empty())
+		targets.push_back(singleTarget);
+	else {
+		const Common::ConfigManager::DomainMap &domains = ConfMan.getGameDomains();
+		Common::ConfigManager::DomainMap::const_iterator iter;
+
+		targets.reserve(domains.size());
+		for (iter = domains.begin(); iter != domains.end(); ++iter)
+			targets.push_back(iter->_key);
+	}
 
 	// FIXME HACK
 	g_system->initBackend();
@@ -1451,7 +1411,7 @@ void upgradeTargets() {
 		DetectionResults detectionResults = EngineMan.detectGames(files);
 		DetectedGames candidates = detectionResults.listRecognizedGames();
 
-		DetectedGame *g = nullptr;
+		DetectedGame *g = 0;
 
 		// We proceed as follows:
 		// * If detection failed to produce candidates, skip.
@@ -1575,11 +1535,6 @@ bool processSettings(Common::String &command, Common::StringMap &settings, Commo
 	} else if (command == "list-all-engines") {
 		listAllEngines();
 		return true;
-#ifdef ENABLE_EVENTRECORDER
-	} else if (command == "list-records") {
-		err = listRecords(settings["game"]);
-		return true;
-#endif
 	} else if (command == "list-saves") {
 		err = listSaves(settings["game"]);
 		return true;
